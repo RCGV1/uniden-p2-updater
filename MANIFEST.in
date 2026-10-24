@@ -1,0 +1,13 @@
+include README.md LICENSE COPYRIGHT THIRD_PARTY_NOTICES.md CHANGELOG.md
+include pyproject.toml MANIFEST.in .gitignore
+recursive-include src *.py
+recursive-include tests *.py
+recursive-include docs *.md
+recursive-include tools *.py
+include .github/workflows/ci.yml
+exclude *.bin *.exe *.dll *.jsonl
+prune logs
+prune research
+prune evidence
+prune dist
+prune build
