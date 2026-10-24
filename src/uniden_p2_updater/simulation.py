@@ -95,7 +95,7 @@ class SimulatedBootloader:
         if packet == b"*MDL" and self.fault == "wrong_model":
             response = b"BCD325P2"
         elif packet == b"VER" and self.mode == "updated":
-            response = b"VER,Version 1.11.07"
+            response = f"VER,Version {self.image.version}".encode("ascii")
         else:
             response = responses.get(packet, b"ERR")
         if packet == b"FWM,Uniden":

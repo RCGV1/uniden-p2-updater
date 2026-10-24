@@ -10,21 +10,27 @@ from . import __version__
 from .files import distinct_paths
 from .logging import CommunicationLogger
 from .transport import Wire
-from .updater import Firmware, Journal, Updater, verified_backup
+from .updater import Firmware, Journal, Updater, verified_backup, require_tested_target
 from .simulation import SimulatedBootloader, SyntheticImage
 from .usb import usb_factory
+from .catalog import firmware_catalog
 
 
 def parser():
     p = argparse.ArgumentParser(description="Unofficial native BCD996P2 pinned-image updater")
     p.add_argument("--version", action="version", version=__version__)
     mode = p.add_mutually_exclusive_group(required=True)
-    for name in ("inspect", "preflight", "dry-run", "flash"):
+    for name in ("inspect", "preflight", "dry-run", "flash", "list-firmware"):
         mode.add_argument("--" + name, action="store_true")
     p.add_argument(
         "--firmware",
         type=Path,
-        help="Official pinned 1.11.07 image; optional for synthetic dry-run",
+        help="Exact cataloged official image; optional for synthetic dry-run",
+    )
+    p.add_argument(
+        "--allow-untested-target",
+        action="store_true",
+        help="Explicit live opt-in for cataloged targets without a physical transfer test",
     )
     p.add_argument("--port", help="Explicit front USB serial device")
     p.add_argument(
@@ -47,6 +53,20 @@ def main(argv=None):
     args = parser().parse_args(argv)
     updater = None
     try:
+        if args.list_firmware:
+            if (
+                args.firmware
+                or args.port
+                or args.backup
+                or args.serial_prefix
+                or args.recover
+                or args.allow_untested_target
+            ):
+                raise ValueError("--list-firmware does not accept transfer arguments")
+            print(json.dumps(firmware_catalog(), indent=2))
+            return 0
+        if args.allow_untested_target and not args.flash:
+            raise ValueError("--allow-untested-target requires --flash")
         if args.recover and not args.flash:
             raise ValueError("--recover requires --flash")
         if args.dry_run and (args.port or args.backup or args.serial_prefix):
@@ -66,6 +86,8 @@ def main(argv=None):
         if args.inspect:
             print(json.dumps(image.metadata(), indent=2))
             return 0
+        if args.flash:
+            require_tested_target(image.pin, allow_untested_target=args.allow_untested_target)
         backup = verified_backup(args.backup) if args.flash else None
         with CommunicationLogger(args.log, simulated=args.dry_run) as logger:
             if args.dry_run:
@@ -108,6 +130,7 @@ def main(argv=None):
                 factory,
                 journal,
                 simulated=args.dry_run,
+                allow_untested_target=args.allow_untested_target,
                 backup_version=backup["firmware"] if backup else None,
                 sleep=(lambda _: None) if args.dry_run else time.sleep,
                 progress=lambda message: print(

@@ -21,7 +21,15 @@ def distinct_paths(*paths):
 def reserve_output(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # O_EXCL also rejects an existing symlink or dangling symlink.
+    # Windows may follow dangling symlinks even with O_EXCL. Reject existing
+    # directory entries explicitly, including links with missing targets.
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise FileExistsError(f"Output already exists: {path}")
+    # O_EXCL prevents replacing a file created after the entry check.
     descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     os.close(descriptor)
 

@@ -42,6 +42,7 @@ class UpdaterTests(unittest.TestCase):
             sleep=lambda _: None,
             progress=lambda _: None,
             simulated=True,
+            backup_version="1.06.00" if recover else None,
         )
         return image, target, updater, journal
 
@@ -111,6 +112,17 @@ class UpdaterTests(unittest.TestCase):
             with self.assertRaises(WireError):
                 updater.run()
             self.assertEqual(target.erase_count, 0)
+
+    def test_recovery_rejects_missing_invalid_or_nonolder_backup_before_transport(self):
+        for version in (None, "bad", "1.11.07", "1.12.00"):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as folder:
+                _, target, updater, journal = self.run_target(folder, recover=True)
+                updater.backup_version = version
+                updater.factory = lambda phase: self.fail("Transport opened before recovery gate")
+                with self.assertRaises(WireError):
+                    updater.run(recover=True)
+                self.assertEqual(target.erase_count, 0)
+                self.assertEqual(journal.data["stage"], "stopped_before_erase")
 
     def test_recovery_skips_normal_mode_service_transition(self):
         with tempfile.TemporaryDirectory() as folder:

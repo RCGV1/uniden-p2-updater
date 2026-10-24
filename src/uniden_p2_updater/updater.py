@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """BCD996P2 firmware updater derived from official BC_VUP3 3.06 behavior.
 
-Native Python/pyserial; no Windows runtime. Only the pinned official 1.11.07
-image is accepted. No license operations, boot-region writes, or arbitrary
+Native Python/pyserial; no Windows runtime. Only exact cataloged official
+images are accepted. No license operations, boot-region writes, or arbitrary
 firmware inputs are supported. --inspect is offline; --preflight is read-only;
 --dry-run uses a synthetic bootloader; --flash explicitly writes firmware.
 """
@@ -17,11 +17,9 @@ import time
 from .transport import WireError
 from .files import atomic_json, reserve_output
 
-MODEL = "BCD996P2"
-VERSION = "1.11.07"
-IMAGE_SHA256 = "4b63481f3c53025e561fe412f6b5f977dd376545ab9fc32d5d5a4b47195534d9"
-IMAGE_SIZE = 1130496
-FOOTER_SIZE = 65536
+from .catalog import MODEL, LATEST_VERSION, IMAGE_SIZE, FOOTER_SIZE, PINS_BY_HASH
+
+VERSION = LATEST_VERSION
 
 
 @dataclass(frozen=True)
@@ -38,11 +36,12 @@ class Firmware:
     @classmethod
     def load(cls, path):
         if Path(path).stat().st_size != IMAGE_SIZE:
-            raise ValueError("Image is not the pinned official BCD996P2 1.11.07 download")
+            raise ValueError("Image is not an exact cataloged official BCD996P2 download")
         data = Path(path).read_bytes()
         digest = hashlib.sha256(data).hexdigest()
-        if len(data) != IMAGE_SIZE or digest != IMAGE_SHA256:
-            raise ValueError("Image is not the pinned official BCD996P2 1.11.07 download")
+        pin = PINS_BY_HASH.get(digest)
+        if len(data) != IMAGE_SIZE or pin is None:
+            raise ValueError("Image is not an exact cataloged official BCD996P2 download")
 
         def footer(offset):
             result = bytearray()
@@ -53,12 +52,22 @@ class Firmware:
                 result.append(byte)
             return result.decode("ascii").strip()
 
-        if footer(40) != MODEL or footer(22) != "Version " + VERSION:
+        if footer(40) != MODEL or footer(22) != "Version " + pin.version:
             raise ValueError("Firmware footer model/version mismatch")
-        return cls(data, digest, VERSION, int.from_bytes(data[-4:-2], "little"))
+        if int.from_bytes(data[-4:-2], "little") != pin.checksum:
+            raise ValueError("Firmware checksum field disagrees with catalog")
+        return cls(data, digest, pin.version, pin.checksum)
+
+    @property
+    def pin(self):
+        pin = PINS_BY_HASH.get(self.sha256)
+        if pin is None or self.version != pin.version or self.checksum != pin.checksum:
+            raise ValueError("Firmware metadata disagrees with exact catalog pin")
+        return pin
 
     def metadata(self):
         return {
+            **self.pin.metadata(),
             "model": MODEL,
             "version": self.version,
             "sha256": self.sha256,
@@ -69,6 +78,13 @@ class Firmware:
             "boot_region_writing": False,
             "license_operations": False,
         }
+
+
+def require_tested_target(pin, *, allow_untested_target=False):
+    if not pin.physical_transfer_validated and not allow_untested_target:
+        raise ValueError(
+            "Target is cataloged but physically unverified; --allow-untested-target is required"
+        )
 
 
 def handshake_size(response, payload_size):
@@ -128,16 +144,15 @@ class Updater:
         progress=print,
         simulated=False,
         backup_version=None,
+        allow_untested_target=False,
     ):
-        if not simulated and (
-            not isinstance(image, Firmware)
-            or len(image.data) != IMAGE_SIZE
-            or hashlib.sha256(image.data).hexdigest() != IMAGE_SHA256
-            or image.sha256 != IMAGE_SHA256
-            or image.version != VERSION
-            or image.checksum != int.from_bytes(image.data[-4:-2], "little")
-        ):
-            raise ValueError("Live updates require the pinned official firmware")
+        if not simulated:
+            if not isinstance(image, Firmware) or len(image.data) != IMAGE_SIZE:
+                raise ValueError("Live updates require an exact cataloged official firmware")
+            pin = image.pin
+            if hashlib.sha256(image.data).hexdigest() != pin.sha256:
+                raise ValueError("Live firmware bytes disagree with catalog")
+            require_tested_target(pin, allow_untested_target=allow_untested_target)
         self.backup_version = backup_version
         self.image, self.factory, self.journal = image, factory, journal
         self.sleep, self.progress = sleep, progress
@@ -156,6 +171,20 @@ class Updater:
     def run(self, *, recover=False):
         wire = None
         try:
+            if recover:
+                if not isinstance(self.backup_version, str) or not re.fullmatch(
+                    r"\d+\.\d+\.\d+", self.backup_version
+                ):
+                    raise WireError("Recovery requires a valid pre-update backup firmware version")
+                if tuple(map(int, self.backup_version.split("."))) >= tuple(
+                    map(int, self.image.version.split("."))
+                ):
+                    raise WireError(
+                        "Recovery target must be newer than the backup firmware version"
+                    )
+                self.journal.set(
+                    "recovery_backup_version_verified", backup_version=self.backup_version
+                )
             if not recover:
                 wire = self.factory("normal")
                 version = self.identify(wire)
@@ -164,7 +193,9 @@ class Updater:
                     raise WireError(
                         "Backup firmware version differs from the connected scanner; export again"
                     )
-                if tuple(map(int, version.split("."))) >= tuple(map(int, VERSION.split("."))):
+                if tuple(map(int, version.split("."))) >= tuple(
+                    map(int, self.image.version.split("."))
+                ):
                     raise WireError(
                         "Scanner is already at or above target version; no write performed"
                     )
@@ -194,7 +225,7 @@ class Updater:
             if wire.pending():
                 raise WireError("Unexpected pending bytes before erase")
             self.progress(
-                f"Writing official {MODEL} {VERSION}; keep scanner power and USB connected."
+                f"Writing official {MODEL} {self.image.version}; keep scanner power and USB connected."
             )
             # Set before sending: a partial write could already trigger erase.
             self.erase_requested = True
@@ -252,7 +283,7 @@ class Updater:
             self.sleep(10)
             wire = self.factory("normal_after_update")
             versions = [self.identify(wire) for _ in range(3)]
-            if versions != [VERSION] * 3:
+            if versions != [self.image.version] * 3:
                 raise WireError(f"Post-update firmware version mismatch: {versions!r}")
             self.journal.set(
                 "complete",
@@ -260,7 +291,7 @@ class Updater:
                 bytes_acknowledged=self.bytes_acknowledged,
             )
             self.progress(
-                f"Verified {MODEL} firmware {VERSION} in three consecutive post-update queries."
+                f"Verified {MODEL} firmware {self.image.version} in three consecutive post-update queries."
             )
             return self.journal.data
         except BaseException as exc:

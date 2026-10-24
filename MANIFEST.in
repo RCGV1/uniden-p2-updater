@@ -1,4 +1,4 @@
-include README.md LICENSE COPYRIGHT THIRD_PARTY_NOTICES.md CHANGELOG.md
+include CONTRIBUTING.md README.md LICENSE COPYRIGHT THIRD_PARTY_NOTICES.md CHANGELOG.md
 include pyproject.toml MANIFEST.in .gitignore
 recursive-include src *.py
 recursive-include tests *.py
